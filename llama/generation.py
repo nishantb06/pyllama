@@ -46,28 +46,33 @@ class LLaMA:
     def generate(
         self,
         prompts: List[str],
-        max_gen_len: int,
-        temperature: float = 0.8,
-        top_p: float = 0.95,
+        max_gen_len: int, # 256
+        temperature: float = 0.8, # 0.8
+        top_p: float = 0.95, # 0.95
         stop_ids: List[int] = None,
         stop_words: List[str] = None,
     ) -> List[str]:
-        bsz = len(prompts)
-        params = self.model.params
+        bsz = len(prompts) # 1
+        params = self.model.params # those same ModelArgs
         assert bsz <= params.max_batch_size, (bsz, params.max_batch_size)
 
         prompt_tokens = [self.tokenizer.encode(x, bos=True, eos=False) for x in prompts]
+        # [[1, 306, 4658, 278, 6593, 310, 2834, 338]]
 
-        min_prompt_size = min([len(t) for t in prompt_tokens])
-        max_prompt_size = max([len(t) for t in prompt_tokens])
+        min_prompt_size = min([len(t) for t in prompt_tokens]) # 8
+        max_prompt_size = max([len(t) for t in prompt_tokens]) # 8
 
-        total_len = min(params.max_seq_len, max_gen_len + max_prompt_size)
+        total_len = min(params.max_seq_len, max_gen_len + max_prompt_size) # 264
 
         tokens = torch.full((bsz, total_len), self.tokenizer.pad_id).cuda().long()
+        # a tensor of size (1, 264) filled with -1's
+
         for k, t in enumerate(prompt_tokens):
             tokens[k, : len(t)] = torch.tensor(t).long()
-        input_text_mask = tokens != self.tokenizer.pad_id
-        start_pos = min_prompt_size
+            # fill the first 8(length of prompt_tokens[0]) tokens of tokens with the prompt tokens
+        input_text_mask = tokens != self.tokenizer.pad_id # a tensor of size (1, 264) filled with True's ,
+        # where tokens is not -1, other wise False
+        start_pos = min_prompt_size # 8
         prev_pos = 0
         for cur_pos in range(start_pos, total_len):
             i = tokens[:, prev_pos:cur_pos]

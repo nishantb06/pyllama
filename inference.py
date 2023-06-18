@@ -13,20 +13,45 @@ def load(
     max_seq_len: int,
     max_batch_size: int,
 ) -> LLaMA:
+    """
+    Used in run function to load the model
+    Args:
+        ckpt_dir: path to the checkpoint directory
+        tokenizer_path: path to the tokenizer
+        local_rank: local rank of the process
+        world_size: world size of the process
+        max_seq_len: maximum sequence length
+        max_batch_size: maximum batch size
+    Returns:
+        generator: LLaMA model
+    """
+
+    # gives a sorted list of file that match the .pth pattern from the ckpt_dir
     checkpoints = sorted(Path(ckpt_dir).glob("*.pth"))
+
+    # The code below does the following, explained in English:
+    # 1. Assert that the number of checkpoints (len(checkpoints)) is equal to the world size. This is because we are loading a checkpoint for MP, and we need to make sure that the number of checkpoints is equal to the number of processes. 
+    # 2. Set the ckpt_path to the checkpoint corresponding to the local rank. 
     assert world_size == len(
         checkpoints
     ), f"Loading a checkpoint for MP={len(checkpoints)} but world size is {world_size}"
     ckpt_path = checkpoints[local_rank]
 
+    # load the checkpoint to cpu. Why CPU though?
     checkpoint = torch.load(ckpt_path, map_location="cpu")
 
+    # load the params from the checkpoint directory which were in a json file
     with open(Path(ckpt_dir) / "params.json", "r") as f:
         params = json.loads(f.read())
 
+    # create a model args object
+    # ModelArgs is a a simple dataclass that contains the parameters for the model
+    # file in llama/model_single.py
     model_args: ModelArgs = ModelArgs(
         max_seq_len=max_seq_len, max_batch_size=max_batch_size, **params
     )
+
+
     tokenizer = Tokenizer(model_path=tokenizer_path)
     model_args.vocab_size = tokenizer.n_words
     torch.set_default_tensor_type(torch.cuda.HalfTensor)
