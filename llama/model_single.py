@@ -63,38 +63,41 @@ def apply_rotary_emb(
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
+
 class Attention(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
 
-        self.n_local_heads = args.n_heads // 1
-        self.head_dim = args.dim // args.n_heads
+        self.n_local_heads = args.n_heads // 1 # 32 // 1 = 32
+        self.head_dim = args.dim // args.n_heads # 4096 // 32 = 128
 
         self.wq = nn.Linear(
             args.dim,
             args.n_heads * self.head_dim,
             bias=False,
-        )
+        ) # (4096, 4096)
         self.wk = nn.Linear(
             args.dim,
             args.n_heads * self.head_dim,
             bias=False,
-        )
+        ) # (4096, 4096)
         self.wv = nn.Linear(
             args.dim,
             args.n_heads * self.head_dim,
             bias=False,
-        )
+        )  # (4096, 4096)
         self.wo = nn.Linear(
             args.n_heads * self.head_dim,
             args.dim,
             bias=False,
-        )
+        ) # (4096, 4096)
         self.cache_k = torch.zeros(
             (args.max_batch_size, args.max_seq_len, self.n_local_heads, self.head_dim)
+            # (1,1024,32,128)
         )
         self.cache_v = torch.zeros(
             (args.max_batch_size, args.max_seq_len, self.n_local_heads, self.head_dim)
+            # (1,1024,32,128)
         )
         if hiq.get_env_bool("KV_CAHCHE_IN_GPU", True):
             self.cache_k = self.cache_k.cuda()
@@ -102,59 +105,59 @@ class Attention(nn.Module):
 
     def forward(
         self,
-        x: torch.Tensor,
-        start_pos: int,
-        freqs_cis: torch.Tensor,
-        mask: Optional[torch.Tensor],
+        x: torch.Tensor, # (1,8,4096)
+        start_pos: int, # 0 (initially)
+        freqs_cis: torch.Tensor,  # (1024, 64)
+        mask: Optional[torch.Tensor],  # (1,1,8,8)
     ):
         bsz, seqlen, _ = x.shape
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
+        # all of shape (1,8,4096)
 
-        xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
-        xk = xk.view(bsz, seqlen, self.n_local_heads, self.head_dim)
-        xv = xv.view(bsz, seqlen, self.n_local_heads, self.head_dim)
+        xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim) # (1,8,32,128)
+        xk = xk.view(bsz, seqlen, self.n_local_heads, self.head_dim) # (1,8,32,128)
+        xv = xv.view(bsz, seqlen, self.n_local_heads, self.head_dim) # (1,8,32,128)
 
-        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
+        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis) # (1,8,32,128), (1,8,32,128)
 
-        self.cache_k = self.cache_k.to(xq)
-        self.cache_v = self.cache_v.to(xq)
+        self.cache_k = self.cache_k.to(xq) # (1,1024,32,128)
+        self.cache_v = self.cache_v.to(xq) # (1,1024,32,128)
 
-        self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
-        self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
+        self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk # (1,1024,32,128)
+        self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv # (1,1024,32,128)
 
-        keys = self.cache_k[:bsz, : start_pos + seqlen]
-        values = self.cache_v[:bsz, : start_pos + seqlen]
+        keys = self.cache_k[:bsz, : start_pos + seqlen] # (1,1024,32,128)
+        values = self.cache_v[:bsz, : start_pos + seqlen] # (1,1024,32,128)
 
-        xq = xq.transpose(1, 2)
-        keys = keys.transpose(1, 2)
-        values = values.transpose(1, 2)
-        scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
+        xq = xq.transpose(1, 2) # (1,32,8,128)
+        keys = keys.transpose(1, 2) # (1,32,1024,128)
+        values = values.transpose(1, 2) # (1,32,1024,128)
+        scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim) # (1,32,8,1024)
         if mask is not None:
             scores = scores + mask  # (bs, n_local_heads, slen, cache_len + slen)
-        scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-        output = torch.matmul(scores, values)  # (bs, n_local_heads, slen, head_dim)
-        output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
+        scores = F.softmax(scores.float(), dim=-1).type_as(xq) # (1,32,8,1024)
+        output = torch.matmul(scores, values)  # (bs, n_local_heads, slen, head_dim) # (1,32,8,128)
+        output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1) # (1,8,4096)
 
-        return self.wo(output)
-
+        return self.wo(output) # (1,8,4096)
 
 class FeedForward(nn.Module):
     def __init__(
         self,
-        dim: int,
-        hidden_dim: int,
-        multiple_of: int,
+        dim: int, # 4096
+        hidden_dim: int, # 4 * 4096 = 16384
+        multiple_of: int, # 256
     ):
         super().__init__()
-        hidden_dim = int(2 * hidden_dim / 3)
-        hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
+        hidden_dim = int(2 * hidden_dim / 3) # 2 * 16384 / 3 = 10922
+        hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of) # 256 * (10922 + 256 - 1) // 256 = 11177
 
-        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
-        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
-        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
+        self.w1 = nn.Linear(dim, hidden_dim, bias=False) # (4096, 11177)
+        self.w2 = nn.Linear(hidden_dim, dim, bias=False) # (11177, 4096)
+        self.w3 = nn.Linear(dim, hidden_dim, bias=False) # (4096, 11177)
 
     def forward(self, x):
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+        return self.w2(F.silu(self.w1(x)) * self.w3(x)) # (1,8,4096)
 
 
 class TransformerBlock(nn.Module):
@@ -166,6 +169,7 @@ class TransformerBlock(nn.Module):
         self.attention = Attention(args)
         self.feed_forward = FeedForward(
             dim=args.dim, hidden_dim=4 * args.dim, multiple_of=args.multiple_of
+            # 4096, 4 * 4096, 256
         )
         self.layer_id = layer_id
         self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
@@ -173,16 +177,18 @@ class TransformerBlock(nn.Module):
 
     def forward(
         self,
-        x: torch.Tensor,
-        start_pos: int,
-        freqs_cis: torch.Tensor,
-        mask: Optional[torch.Tensor],
+        x: torch.Tensor, # (1,8,4096)
+        start_pos: int, # 0 (initially)
+        freqs_cis: torch.Tensor, # (1024, 64)
+        mask: Optional[torch.Tensor], # (1,1,8,8)
     ):
+        # this is a skip connection
         h = x + self.attention.forward(
             self.attention_norm(x), start_pos, freqs_cis, mask
-        )
+            # (1,8,4096), 0, (1024, 64), (1,1,8,8)
+        ) # (1,8,4096)
         out = h + self.feed_forward.forward(self.ffn_norm(h))
-        return out
+        return out # (1,8,4096)
 
 
 class Transformer(nn.Module):
@@ -192,35 +198,39 @@ class Transformer(nn.Module):
         self.vocab_size = params.vocab_size
         self.n_layers = params.n_layers
 
-        self.tok_embeddings = nn.Embedding(params.vocab_size, params.dim)
+        self.tok_embeddings = nn.Embedding(params.vocab_size, params.dim) # (32_000, 4096)
 
         self.layers = torch.nn.ModuleList()
         for layer_id in range(params.n_layers):
             self.layers.append(TransformerBlock(layer_id, params))
 
         self.norm = RMSNorm(params.dim, eps=params.norm_eps)
-        self.output = nn.Linear(params.dim, params.vocab_size, bias=False)
+        self.output = nn.Linear(params.dim, params.vocab_size, bias=False) # (4096, 32_000)
 
         self.freqs_cis = precompute_freqs_cis(
             self.params.dim // self.params.n_heads, self.params.max_seq_len * 2
-        )
+            # 4096 // 32 = 128, 1024 * 2
+        ) # torch.Size([2048, 64])
 
     @torch.inference_mode()
     def forward(self, tokens: torch.Tensor, start_pos: int):
-        _bsz, seqlen = tokens.shape
-        h = self.tok_embeddings(tokens)
+        _bsz, seqlen = tokens.shape # (1,8)
+        h = self.tok_embeddings(tokens) # (1,8,4096)
         self.freqs_cis = self.freqs_cis.to(h.device)
-        freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
+        freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen] # torch.Size([1024, 64])
 
         mask = None
         if seqlen > 1:
             mask = torch.full(
                 (1, 1, seqlen, seqlen), float("-inf"), device=tokens.device
-            )
+            ) # (1,1,8,8) , filled with -inf
             mask = torch.triu(mask, diagonal=start_pos + 1).type_as(h)
+            # (1,1,8,8) , filled with -inf, but only the upper triangle, lower triangle is 0
+            # diagnol = start_pos + 1, so the first 8 tokens are not masked, it basically pushes the diagonola above
+
 
         for layer in self.layers:
             h = layer(h, start_pos, freqs_cis, mask)
-        h = self.norm(h)
-        output = self.output(h[:, -1, :])  # only compute last logits
-        return output.float()
+        h = self.norm(h) # (1,8,4096)
+        output = self.output(h[:, -1, :])  # only compute last logits # (1, 4096) * (4096, 32_000) = (1, 32_000)
+        return output.float() # (1, 32_000)
