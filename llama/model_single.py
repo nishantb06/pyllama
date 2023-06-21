@@ -194,9 +194,9 @@ class TransformerBlock(nn.Module):
 class Transformer(nn.Module):
     def __init__(self, params: ModelArgs):
         super().__init__()
-        self.params = params
-        self.vocab_size = params.vocab_size
-        self.n_layers = params.n_layers
+        self.params = params # ModelArgs
+        self.vocab_size = params.vocab_size # 32_000
+        self.n_layers = params.n_layers # 32
 
         self.tok_embeddings = nn.Embedding(params.vocab_size, params.dim) # (32_000, 4096)
 
@@ -204,7 +204,7 @@ class Transformer(nn.Module):
         for layer_id in range(params.n_layers):
             self.layers.append(TransformerBlock(layer_id, params))
 
-        self.norm = RMSNorm(params.dim, eps=params.norm_eps)
+        self.norm = RMSNorm(params.dim, eps=params.norm_eps) # shape of output is same as input
         self.output = nn.Linear(params.dim, params.vocab_size, bias=False) # (4096, 32_000)
 
         self.freqs_cis = precompute_freqs_cis(
