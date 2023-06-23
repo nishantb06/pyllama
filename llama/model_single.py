@@ -43,24 +43,25 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
 
 
 def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
-    ndim = x.ndim
+    # shape of x : (1,8,32,64)
+    ndim = x.ndim # 4
     assert 0 <= 1 < ndim
-    assert freqs_cis.shape == (x.shape[1], x.shape[-1])
-    shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
-    return freqs_cis.view(*shape)
+    assert freqs_cis.shape == (x.shape[1], x.shape[-1]) # (8,64) == (8,64)
+    shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)] # (1,8,1,64)
+    return freqs_cis.view(*shape) # (1,8,1,64)
 
 
 def apply_rotary_emb(
-    xq: torch.Tensor,
-    xk: torch.Tensor,
-    freqs_cis: torch.Tensor,
+    xq: torch.Tensor, # (1,8,32,128)
+    xk: torch.Tensor, # (1,8,32,128)
+    freqs_cis: torch.Tensor, # (8,64)
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
-    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
-    freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
-    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
-    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
-    return xq_out.type_as(xq), xk_out.type_as(xk)
+    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2)) # (1,8,32,128) -> (1,8,32,64,2)
+    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2)) # (1,8,32,128) -> (1,8,32,64,2)
+    freqs_cis = reshape_for_broadcast(freqs_cis, xq_) # (1,8,1,64)
+    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3) # (1,8,32,64,2) -> (1,8,32,128) 
+    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3) # (1,8,32,64,2) -> (1,8,32,128)
+    return xq_out.type_as(xq), xk_out.type_as(xk) # (1,8,32,128), (1,8,32,128)
 
 
 
@@ -107,7 +108,7 @@ class Attention(nn.Module):
         self,
         x: torch.Tensor, # (1,8,4096)
         start_pos: int, # 0 (initially)
-        freqs_cis: torch.Tensor,  # (1024, 64)
+        freqs_cis: torch.Tensor,  # (8, 64)
         mask: Optional[torch.Tensor],  # (1,1,8,8)
     ):
         bsz, seqlen, _ = x.shape
@@ -179,7 +180,7 @@ class TransformerBlock(nn.Module):
         self,
         x: torch.Tensor, # (1,8,4096)
         start_pos: int, # 0 (initially)
-        freqs_cis: torch.Tensor, # (1024, 64)
+        freqs_cis: torch.Tensor, # (8, 64)
         mask: Optional[torch.Tensor], # (1,1,8,8)
     ):
         # this is a skip connection
@@ -217,7 +218,7 @@ class Transformer(nn.Module):
         _bsz, seqlen = tokens.shape # (1,8)
         h = self.tok_embeddings(tokens) # (1,8,4096)
         self.freqs_cis = self.freqs_cis.to(h.device)
-        freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen] # torch.Size([1024, 64])
+        freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen] # torch.Size([8, 64])
 
         mask = None
         if seqlen > 1:
