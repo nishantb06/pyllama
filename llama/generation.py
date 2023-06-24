@@ -14,7 +14,11 @@ class LLaMA:
         self.tokenizer = tokenizer
         
     def _should_stop(self, tokens, prompt_tokens, stop_ids, stop_words):
-        """credits go to: https://github.com/galatolofederico/vanilla-llama"""
+        """credits go to: https://github.com/galatolofederico/vanilla-llama
+        If a particular token is in the stop_ids list, then we stop generation.
+        Thats it.
+        """
+
         if stop_ids is not None:
             do_stop = [False for _ in range(len(tokens))]
             for i, (t, p) in enumerate(zip(tokens, prompt_tokens)):
@@ -109,6 +113,12 @@ class LLaMA:
 
 
 def postprocessing(output_text, stop_words=None, threshold=10):
+    """ 
+    The purpose of this post-processing function is to clean up the generated 
+    text and ensure that it contains valid and properly formatted sentences. 
+    It also provides the flexibility to handle specific cases such as removing
+    stop words and enforcing proper sentence endings.
+    """
     sentences = output_text.split(".")
     filtered_sentences = []
     for sentence in sentences:
