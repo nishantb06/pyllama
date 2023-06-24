@@ -56,9 +56,10 @@ def apply_rotary_emb(
     xk: torch.Tensor, # (1,8,32,128)
     freqs_cis: torch.Tensor, # (8,64)
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2)) # (1,8,32,128) -> (1,8,32,64,2)
-    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2)) # (1,8,32,128) -> (1,8,32,64,2)
+    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2)) # (1,8,32,128) -> (1,8,32,64,2) -> (1,8,32,64)
+    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2)) # (1,8,32,128) -> (1,8,32,64,2) -> (1,8,32,64)
     freqs_cis = reshape_for_broadcast(freqs_cis, xq_) # (1,8,1,64)
+    # Element-wise multiplication of 2 matrices which has complex numbers
     xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3) # (1,8,32,64,2) -> (1,8,32,128) 
     xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3) # (1,8,32,64,2) -> (1,8,32,128)
     return xq_out.type_as(xq), xk_out.type_as(xk) # (1,8,32,128), (1,8,32,128)
@@ -115,32 +116,39 @@ class Attention(nn.Module):
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
         # all of shape (1,8,4096)
 
-        xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim) # (1,8,32,128)
-        xk = xk.view(bsz, seqlen, self.n_local_heads, self.head_dim) # (1,8,32,128)
-        xv = xv.view(bsz, seqlen, self.n_local_heads, self.head_dim) # (1,8,32,128)
+        xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim) # (1,8,32,128) # (1,1,32,128)
+        xk = xk.view(bsz, seqlen, self.n_local_heads, self.head_dim) # (1,8,32,128) # (1,1,32,128)
+        xv = xv.view(bsz, seqlen, self.n_local_heads, self.head_dim) # (1,8,32,128) # (1,1,32,128)
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis) # (1,8,32,128), (1,8,32,128)
+        # # (1,1,32,128), (1,1,32,128)
 
-        self.cache_k = self.cache_k.to(xq) # (1,1024,32,128)
-        self.cache_v = self.cache_v.to(xq) # (1,1024,32,128)
+        self.cache_k = self.cache_k.to(xq) # (1,1024,32,128) moved to the same device as xq
+        self.cache_v = self.cache_v.to(xq) # (1,1024,32,128) moved to the smae device as xq
 
         self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk # (1,1024,32,128)
         self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv # (1,1024,32,128)
 
-        keys = self.cache_k[:bsz, : start_pos + seqlen] # (1,1024,32,128)
-        values = self.cache_v[:bsz, : start_pos + seqlen] # (1,1024,32,128)
+        keys = self.cache_k[:bsz, : start_pos + seqlen] # (1,start_pos + seqlen,32,128) or (1,8,32,128)
+        values = self.cache_v[:bsz, : start_pos + seqlen] # (1,start_pos + seqlen,32,128) or (1,8,32,128)
+        # in the next run it will be (1,9,32,128) 
 
-        xq = xq.transpose(1, 2) # (1,32,8,128)
-        keys = keys.transpose(1, 2) # (1,32,1024,128)
-        values = values.transpose(1, 2) # (1,32,1024,128)
-        scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim) # (1,32,8,1024)
-        if mask is not None:
-            scores = scores + mask  # (bs, n_local_heads, slen, cache_len + slen)
-        scores = F.softmax(scores.float(), dim=-1).type_as(xq) # (1,32,8,1024)
+        xq = xq.transpose(1, 2) # (1,32,8,128) -> (1,32,1,128)
+        keys = keys.transpose(1, 2) # (1,32,8,128) -> (1,32,9,128)
+        values = values.transpose(1, 2) # (1,32,8,128) -> (1,32,9,128)
+        scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim) # (1,32,8,8)
+        # matrix multiply of (1,32,8,128) and (1,32,128,8) resulting in # (1,32,8,8)
+        # matrix multiply of (1,32,1,128) and (1,32,128,9) resulting in # (1,32,1,9)
+        if mask is not None: # (1,1,8,8) -> (1,1,1,1)
+            scores = scores + mask  # (bs, n_local_heads, slen, cache_len + slen) # (1,32,8,8) -> (1,32,1,9)
+        scores = F.softmax(scores.float(), dim=-1).type_as(xq) # (1,32,8,8) -> (1,32,1,9)
         output = torch.matmul(scores, values)  # (bs, n_local_heads, slen, head_dim) # (1,32,8,128)
-        output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1) # (1,8,4096)
+		# matrix multiply of (1,32,8,8) and (1,32,8,128) resulting in (1,32,8,128)
+        # matrix multiply of (1,32,1,9) and (1,32,9,128) resulting in (1,32,1,128)
+        output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1) # (1,8,4096) -> (1,1,4096)
 
-        return self.wo(output) # (1,8,4096)
+        return self.wo(output) # (1,8,4096) x (4096,4096) -> (1,8,4096)
+        # (1,1,4096) x (4096,4096) -> (1,1,4096)
 
 class FeedForward(nn.Module):
     def __init__(

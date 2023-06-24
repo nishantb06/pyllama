@@ -125,7 +125,19 @@ def postprocessing(output_text, stop_words=None, threshold=10):
     return r
 
 
-def sample_top_p(probs, p):
+def sample_top_p(probs, # a tensor of size (1, 32_000) with softmax already applied
+                 p # 0.95
+                 ):
+    """ 
+    In summary, the sample_top_p function performs top-p sampling on a given probability
+    distribution. It sorts the probabilities, computes the cumulative sum, applies a 
+    threshold to remove tokens with cumulative probabilities exceeding the threshold, 
+    normalizes the probabilities, samples a token using multinomial sampling, and returns 
+    the sampled token index.
+
+    If the sum of probalities coming before a token is greater than p, then the token is
+    not considered for sampling. This is done by setting the probability of the token to 0.
+    """
     probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
     probs_sum = torch.cumsum(probs_sort, dim=-1)
     mask = probs_sum - probs_sort > p
